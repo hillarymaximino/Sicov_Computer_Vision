@@ -1,0 +1,30 @@
+# Ambiente Python
+.venv/
+venv/
+env/
+
+# Build do CMake
+build/
+cmake-build-*/
+
+# Dependências locais / binários grandes
+onnxruntime-gpu/
+
+# Arquivos compactados e cópias locais
+*.zip
+
+# Cache Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Arquivos de ambiente e possíveis segredos
+.env
+.env.*
+!.env.example
+
+# Configurações locais do VS Code
+.vscode/
+
+# Arquivos gerados
+runs/
