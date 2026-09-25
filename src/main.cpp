@@ -41,7 +41,7 @@ int main(void)
     // Isso e util para acelerar a inferencia
     cv::setNumThreads(8);
 
-    const std::string cameraUrl = "rtsp://admin:admin123@192.168.11.15/cam/realmonitor?channel=1&subtype=0";
+    const std::string cameraUrl = "rtsp://admin:admin123@192.168.11.63/cam/realmonitor?channel=1&subtype=0";
     const std::string modelPath = "models/yolo11n.onnx";
 
     if (!Orchestrator_Init(cameraUrl, modelPath)) 
