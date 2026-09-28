@@ -88,13 +88,13 @@ void Orchestrator_Run()
     bool isRunning = true;
 
     // 1. Cria a janela redimensionável
-    cv::namedWindow("SICOV - Monitoramento de celulares", cv::WINDOW_NORMAL);
+    cv::namedWindow("SICOV - Monitoramento de objetos", cv::WINDOW_NORMAL);
 
     // 2. Redimensiona para metade da largura (1920 / 2 = 960) e altura total (1080)
-    cv::resizeWindow("SICOV - Monitoramento de celulares", 960, 1080);
+    cv::resizeWindow("SICOV - Monitoramento de objetos", 960, 1080);
 
     // 3. Posiciona a janela colada na lateral esquerda (x = 0, y = 0)
-    cv::moveWindow("SICOV - Monitoramento de celulares", 0, 0);
+    cv::moveWindow("SICOV - Monitoramento de objetos", 0, 0);
 
     Vision_Start();
 
@@ -115,25 +115,41 @@ void Orchestrator_Run()
         Vision_SubmitFrame(frame); // não bloqueia, só entrega o frame mais novo
 
         std::vector<cv::Rect> boxes;
+        std::vector<int> classes;
         int cellCount = 0;
-        Vision_GetOverlay(boxes, cellCount); // pega o último resultado pronto
+        Vision_GetOverlay(boxes, classes, cellCount);
 
         cv::Rect roi(static_cast<int>(frame.cols * 0.25), static_cast<int>(frame.rows * 0.25),
                      static_cast<int>(frame.cols * 0.5), static_cast<int>(frame.rows * 0.5));
 
         cv::rectangle(frame, roi, cv::Scalar(255, 0, 0), 2);
 
-        for (const auto& box : boxes) 
+        for (size_t i = 0; i < boxes.size(); i++) 
         {
+            const auto& box = boxes[i];
+            int classId = classes[i];
+            
             cv::Point center(box.x + box.width / 2, box.y + box.height / 2);
-            cv::rectangle(frame, box, cv::Scalar(0, 255, 255), 2);
-            cv::circle(frame, center, 4, cv::Scalar(0, 0, 255), -1);
+            
+            // O OpenCV usa o padrão BGR (Blue, Green, Red)
+            cv::Scalar boxColor;
+            
+            if (classId == 67) { 
+                // Se for Celular, Vermelho (0 Azul, 0 Verde, 255 Vermelho)
+                boxColor = cv::Scalar(0, 0, 255);
+            } else {
+                // Se for qualquer outra coisa, Verde (0 Azul, 255 Verde, 0 Vermelho)
+                boxColor = cv::Scalar(0, 255, 0);
+            }
+
+            cv::rectangle(frame, box, boxColor, 2);
+            cv::circle(frame, center, 4, boxColor, -1); // Pinta a bolinha do centro com a mesma cor
         }
 
-        cv::putText(frame, "Celulares detectados: " + std::to_string(cellCount),
+        cv::putText(frame, "Objetos detectados: " + std::to_string(cellCount),
                     cv::Point(20, 40), cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 255, 0), 2);
 
-        cv::imshow("SICOV - Monitoramento de celulares", frame);
+        cv::imshow("SICOV - Monitoramento de objetos", frame);
 
         if (static_cast<char>(cv::waitKey(1)) == 27) 
         {
