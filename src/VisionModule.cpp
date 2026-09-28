@@ -39,10 +39,14 @@
 static constexpr int dINPUT_SIZE = 640;
 
 /// IDs de classe do dataset COCO aceitas pelo sistema
-static constexpr int dCLASS_ID_CELLPHONE = 73; // Caderno/Celular
+static constexpr int dCLASS_ID_BOTTLE    = 39; // Garrafa
+static constexpr int dCLASS_ID_CUP       = 41; // Copo
+static constexpr int dCLASS_ID_FORK      = 42; // Garfo
+static constexpr int dCLASS_ID_CELLPHONE = 67; // Celular
+static constexpr int dCLASS_ID_BOOK      = 73; // Livro
 
 /// Limiares de confianca e sobreposicao (NMS)
-static constexpr float dCONFIDENCE_THRESHOLD = 0.30f;
+static constexpr float dCONFIDENCE_THRESHOLD = 0.65f;
 static constexpr float dNMS_THRESHOLD = 0.30f;
 
 /*******************************************************************************
@@ -63,6 +67,7 @@ static struct
 
     /// Buffer de saida com os resultados mais recentes da IA
     std::vector<cv::Rect> resultBoxes;
+    std::vector<int> resultClasses;
     int resultCount{0};
     std::mutex resultMutex;
 
@@ -75,7 +80,7 @@ static struct
  * PROTOTIPOS LOCAIS
  ******************************************************************************/
 
-static void RunInference(const cv::Mat& frame, std::vector<cv::Rect>& outBoxes, int& outCount);
+static void RunInference(const cv::Mat& frame, std::vector<cv::Rect>& outBoxes, std::vector<int>& outClasses, int& outCount);
 static void VisionLoop(void);
 
 /*******************************************************************************
@@ -188,10 +193,10 @@ void Vision_SubmitFrame(const cv::Mat& frame)
  *  @details O acesso as variaveis e protegido por Mutex para nao corromper
  *           a memoria da tela de exibicao (Orchestrator).
  ******************************************************************************/
-void Vision_GetOverlay(std::vector<cv::Rect>& boxes, int& vehicleCount) 
-{
+void Vision_GetOverlay(std::vector<cv::Rect>& boxes, std::vector<int>& outClasses, int& vehicleCount){
     std::lock_guard<std::mutex> lock(visionCtx.resultMutex);
     boxes = visionCtx.resultBoxes;
+    outClasses = visionCtx.resultClasses;
     vehicleCount = visionCtx.resultCount;
 }
 
@@ -207,7 +212,7 @@ void Vision_GetOverlay(std::vector<cv::Rect>& boxes, int& vehicleCount)
  *  @details Realiza redimensionamento, inferencia, correcao de transposta 
  *           de matriz e aplicacao de limites geometricos e de confianca (NMS).
  ******************************************************************************/
-static void RunInference(const cv::Mat& frame, std::vector<cv::Rect>& outBoxes, int& outCount) 
+static void RunInference(const cv::Mat& frame, std::vector<cv::Rect>& outBoxes, std::vector<int>& outClasses, int& outCount)
 {
     cv::Rect roi(
         static_cast<int>(frame.cols * 0.25),
@@ -243,6 +248,7 @@ static void RunInference(const cv::Mat& frame, std::vector<cv::Rect>& outBoxes, 
 
     std::vector<float> confidences;
     std::vector<cv::Rect> boxes;
+    std::vector<int> classIds;
     float x_factor = frame.cols / static_cast<float>(dINPUT_SIZE);
     float y_factor = frame.rows / static_cast<float>(dINPUT_SIZE);
     int numClasses = numAttrs - 4;
@@ -264,7 +270,11 @@ static void RunInference(const cv::Mat& frame, std::vector<cv::Rect>& outBoxes, 
         {
             int classId = classIdPoint.x; 
         
-            if (classId == 73 || classId == 67 || classId == 65) 
+            if (classId == dCLASS_ID_BOTTLE || 
+                classId == dCLASS_ID_CUP    || 
+                classId == dCLASS_ID_FORK   || 
+                classId == dCLASS_ID_CELLPHONE || 
+                classId == dCLASS_ID_BOOK)
             {
                 float cx = row[0] * x_factor;
                 float cy = row[1] * y_factor;
@@ -275,6 +285,7 @@ static void RunInference(const cv::Mat& frame, std::vector<cv::Rect>& outBoxes, 
                 
                 boxes.push_back(cv::Rect(left, top, static_cast<int>(w), static_cast<int>(h)));
                 confidences.push_back(static_cast<float>(maxScore));
+                classIds.push_back(classId);
             }
         }
     }
@@ -283,6 +294,7 @@ static void RunInference(const cv::Mat& frame, std::vector<cv::Rect>& outBoxes, 
     cv::dnn::NMSBoxes(boxes, confidences, dCONFIDENCE_THRESHOLD, dNMS_THRESHOLD, indices);
 
     outBoxes.clear();
+    outClasses.clear();
     outCount = 0;
     
     for (int idx : indices) 
@@ -294,6 +306,7 @@ static void RunInference(const cv::Mat& frame, std::vector<cv::Rect>& outBoxes, 
         {
             outCount++;
             outBoxes.push_back(box);
+            outClasses.push_back(classIds[idx]);
         }
     }
 }
@@ -323,8 +336,9 @@ static void VisionLoop(void)
         auto t0 = std::chrono::steady_clock::now();
 
         std::vector<cv::Rect> boxes;
+        std::vector<int> classes;
         int count = 0;
-        RunInference(frame, boxes, count);
+        RunInference(frame, boxes, classes, count);
 
         auto t1 = std::chrono::steady_clock::now();
         double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -332,6 +346,7 @@ static void VisionLoop(void)
 
         std::lock_guard<std::mutex> lock(visionCtx.resultMutex);
         visionCtx.resultBoxes = std::move(boxes);
+        visionCtx.resultClasses = std::move(classes);
         visionCtx.resultCount = count;
     }
 }
