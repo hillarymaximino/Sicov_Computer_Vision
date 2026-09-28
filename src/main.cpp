@@ -42,7 +42,7 @@ int main(void)
     cv::setNumThreads(8);
 
     const std::string cameraUrl = "rtsp://admin:admin123@192.168.11.63/cam/realmonitor?channel=1&subtype=0";
-    const std::string modelPath = "models/yolo11n.onnx";
+    const std::string modelPath = "models/yolo11m.onnx";
 
     if (!Orchestrator_Init(cameraUrl, modelPath)) 
     {
@@ -56,4 +56,14 @@ int main(void)
     return 0;
 }
 
+
+/*
+touch src/main.cpp
+cmake --build build -j$(nproc)
+./build/VisionTest
+*/
+
 /** @} DOXYGEN GROUP TAG END OF FILE */
+
+
+
