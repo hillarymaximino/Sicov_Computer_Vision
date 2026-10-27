@@ -2,164 +2,289 @@
 /**
  * @file    Orchestrator.cpp
  * @addtogroup ORCHESTRATOR
- * @brief   Modulo principal de orquestracao e interface grafica.
+ * @brief   Implementacao do Orquestrador: gestao do pipeline, unificacao da ROI, HUD e STM32.
  * @author  Gonçalves
- * @details
- * \n <b>Ferramentas:</b>
- * - C++17, OpenCV.
- *
- * \n <b>Dependencias:</b>
- * - Bsp (Camera/Hardware).
- * - VisionModule (Inteligencia Artificial).
- *
- * \n <b>Observacoes:</b>
- * - Coordena a inicializacao da captura de video e da IA.
- * - Gerencia o laco principal (main loop), desenha as interfaces (ROI e deteccoes).
- * - Exibe os resultados em tempo real em uma janela do OpenCV.
- *
- * @{
  ******************************************************************************/
 
-/*******************************************************************************
- * INCLUDES
- ******************************************************************************/
 #include "Orchestrator.hpp"
-#include "Bsp.hpp"          // Precisa conhecer a câmera
-#include "VisionModule.hpp" // Precisa conhecer a IA
+#include "CameraModule.hpp"
+#include "VisionModule.hpp"
+#include "Stm32Bridge.hpp" // [STM32] 1. Inclui a biblioteca de comunicacao com o STM32
+#include <opencv2/opencv.hpp>
+#include <algorithm>
+#include <atomic>
 #include <iostream>
+#include <string>
+#include <vector>
 
-/*******************************************************************************
- * DEFINES LOCAIS E CONSTANTES
- ******************************************************************************/
-// Nao ha defines locais neste modulo.
+static const char* const dWINDOW_NAME = "SICOV - Inspecao de Formas Geometricas";
+static const char* const dROI_CONFIG_FILE = "roi_config.yml";
+static constexpr int dROI_MAX = 1000;
+static constexpr int dCLASS_ID_CIRCULO = 0;
 
-/*******************************************************************************
- * ESTRUTURAS DE DADOS LOCAIS
- ******************************************************************************/
-// Nao ha estruturas de dados locais neste modulo.
+static int gRoiCx = 500;
+static int gRoiCy = 330;
+static int gRoiW  = 250;
+static int gRoiH  = 250;
 
-/*******************************************************************************
- * PROTOTIPOS LOCAIS
- ******************************************************************************/
-// Nao ha prototipos locais neste modulo.
+static std::atomic<bool> gSinalCirculo{false};
 
-/*******************************************************************************
- * FUNCOES PUBLICAS
- ******************************************************************************/
+static cv::Rect ObterEnquadramentoInspecao(const cv::Size& frameSize);
+static std::string ObterNomeForma(int classId);
+static void CarregarROI(void);
+static void SalvarROI(void);
 
-/******************************************************************************/
-/** @brief  Inicializa os subsistemas na ordem correta.
- * @param  streamUrl: Caminho ou link RTSP/HTTP da camera.
- * @param  modelPath: Caminho do arquivo de modelo ONNX.
- * @retval true se todos os modulos iniciarem com sucesso, false caso contrario.
- * @details Tenta iniciar primeiro a camera (BSP). Se falhar, aborta.
- * Em seguida, inicia a IA. Se a IA falhar, desliga a camera antes
- * de abortar para evitar vazamento de memoria ou threads orfas.
- ******************************************************************************/
-bool Orchestrator_Init(const std::string& streamUrl, const std::string& modelPath) 
+bool Orchestrator_Init(const std::string& modelPath, const std::string& cameraSN)
 {
+    cv::setNumThreads(8);
+
     std::cout << "[ORCHESTRATOR] Inicializando subsistemas..." << std::endl;
 
-    // Liga a câmera. Se der erro, aborta o sistema inteiro (return false).
-    if (!Bsp_InitCamera(streamUrl)) {
+    if (!Vision_Init(modelPath))
+    {
+        std::cerr << "[ORCHESTRATOR] Falha critica ao inicializar VisionModule." << std::endl;
         return false;
     }
 
-    // Liga o cérebro que é o vision.
-    if (!Vision_Init(modelPath)) {
-        // Se a câmera ligou, mas a IA falhou, precisamos desligar a câmera antes de abortar.
-        Bsp_ReleaseCamera(); 
+    if (!Camera_Init(cameraSN))
+    {
+        std::cerr << "[ORCHESTRATOR] Falha critica ao inicializar CameraModule." << std::endl;
         return false;
     }
 
-    std::cout << "[ORCHESTRATOR] Modulos inicializados com sucesso." << std::endl;
+    // [STM32] 2. Conecta automaticamente ao microcontrolador STM32
+    if (!bridge::conectar())
+    {
+        std::cerr << "[ORCHESTRATOR] Falha critica ao conectar ao STM32." << std::endl;
+        return false;
+    }
+    std::cout << "[ORCHESTRATOR] STM32 conectado na porta: " << bridge::obter_porta_conectada() << std::endl;
+
+    std::cout << "[ORCHESTRATOR] Todos os subsistemas prontos para execucao." << std::endl;
     return true;
 }
 
-/******************************************************************************/
-/** @brief  Loop principal que mantem o sistema vivo.
- * @details Cria a janela de exibicao, coordena a troca de frames entre
- * o BSP e o VisionModule, aplica as sobreposicoes (ROI, bounding boxes,
- * textos) e gerencia o encerramento seguro pelo usuario (tecla ESC).
- ******************************************************************************/
-void Orchestrator_Run() 
+void Orchestrator_Run(void)
 {
-    cv::Mat frame;
-    bool isRunning = true;
-
-    // 1. Cria a janela redimensionável
-    cv::namedWindow("SICOV - Monitoramento de objetos", cv::WINDOW_NORMAL);
-
-    // 2. Redimensiona para metade da largura (1920 / 2 = 960) e altura total (1080)
-    cv::resizeWindow("SICOV - Monitoramento de objetos", 960, 1080);
-
-    // 3. Posiciona a janela colada na lateral esquerda (x = 0, y = 0)
-    cv::moveWindow("SICOV - Monitoramento de objetos", 0, 0);
-
     Vision_Start();
+    Camera_Start();
 
-    while (isRunning) 
+    CarregarROI();
+
+    cv::namedWindow(dWINDOW_NAME, cv::WINDOW_NORMAL);
+
+    cv::createTrackbar("ROI centro X", dWINDOW_NAME, &gRoiCx, dROI_MAX);
+    cv::createTrackbar("ROI centro Y", dWINDOW_NAME, &gRoiCy, dROI_MAX);
+    cv::createTrackbar("ROI largura",  dWINDOW_NAME, &gRoiW,  dROI_MAX);
+    cv::createTrackbar("ROI altura",   dWINDOW_NAME, &gRoiH,  dROI_MAX);
+
+    cv::Mat frame;
+    std::vector<DetectionResult> detections;
+    bool estadoAnteriorSinal = false;
+
+    // Trava para garantir que, ao detectar 1 vez, pare imediatamente ate o ciclo do STM32
+    bool aguardandoLiberacaoStm32 = false;
+
+    std::cout << "[ORCHESTRATOR] Pipeline ativo. 's' = salvar ROI | ESC = finalizar." << std::endl;
+
+    while (true)
     {
-        if (!Bsp_GetFrame(frame)) 
+        // 1. Obtem o quadro gerado pela camera
+        if (Camera_GetFrame(frame))
         {
-            std::cerr << "[ORCHESTRATOR] Conexao com a camera perdida." << std::endl;
-            break;
-        }
-        
-        if (frame.empty()) 
-        {
-            cv::waitKey(10);
-            continue;
-        }
+            // =========================================================================
+            // CORRECAO DO FANTASMA: A IA continua recebendo os quadros da camera em
+            // background mesmo durante a pausa! Assim, quando o circulo e retirado da
+            // esteira, a memoria da GPU ja limpa a caixa antiga em tempo real, sem
+            // precisar esvaziar buffer e sem travar a imagem.
+            // =========================================================================
+            Vision_SubmitFrame(frame);
+            Vision_GetOverlay(detections);
 
-        Vision_SubmitFrame(frame); // não bloqueia, só entrega o frame mais novo
+            // Calcula e desenha a moldura da Zona de Inspecao (ROI)
+            cv::Rect roi = ObterEnquadramentoInspecao(frame.size());
+            cv::rectangle(frame, roi, cv::Scalar(0, 255, 255), 2);
+            cv::putText(frame, "ZONA DE INSPECAO", cv::Point(roi.x, std::max(15, roi.y - 10)),
+                        cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 255, 255), 1);
 
-        std::vector<cv::Rect> boxes;
-        std::vector<int> classes;
-        int cellCount = 0;
-        Vision_GetOverlay(boxes, classes, cellCount);
+            // [STM32] 3. Verifica se o STM32 mandou pausar (false) ou se acabamos de detectar 1 vez
+            if (!bridge::esta_varredura_ativa())
+            {
+                // O STM32 confirmou a pausa: podemos destravar a flag local para que,
+                // assim que o 0xB1 chegar (esta_varredura_ativa == true), volte a detectar.
+                aguardandoLiberacaoStm32 = false;
 
-        cv::Rect roi(static_cast<int>(frame.cols * 0.25), static_cast<int>(frame.rows * 0.25),
-                     static_cast<int>(frame.cols * 0.5), static_cast<int>(frame.rows * 0.5));
+                // Se o STM32 pausou a varredura (esteira parada / servo atuando) e o sinal
+                // estava ativo antes, reseta o estado de "objeto encontrado" para "sem objeto"
+                if (estadoAnteriorSinal)
+                {
+                    std::cout << "[STM32] Varredura pausada. Resetando sinal para SEM OBJETO (0xA0)..." << std::endl;
+                    bridge::enviar_sem_objeto();
+                    estadoAnteriorSinal = false;
+                    gSinalCirculo = false;
+                }
 
-        cv::rectangle(frame, roi, cv::Scalar(255, 0, 0), 2);
+                // Mostra aviso na tela de que o codigo esta aguardando o STM32 liberar
+                cv::putText(frame, "PAUSADO PELO STM32 (AGUARDANDO 0xB1)", cv::Point(10, 30),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 165, 255), 2);
+            }
+            else if (aguardandoLiberacaoStm32)
+            {
+                // Se ja detectou 1 vez, trava a deteccao nos milissegundos em que o STM32
+                // ainda esta processando a parada da esteira.
+                cv::putText(frame, "OBJETO DETECTADO - PARANDO SISTEMA...", cv::Point(10, 30),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 165, 255), 2);
+            }
+            else
+            {
+                // Varredura ATIVA: avalia as deteccoes do frame atual
+                int totalNaZona = 0;
+                bool circuloDetectadoNesteCiclo = false;
 
-        for (size_t i = 0; i < boxes.size(); i++) 
-        {
-            const auto& box = boxes[i];
-            int classId = classes[i];
-            
-            cv::Point center(box.x + box.width / 2, box.y + box.height / 2);
-            
-            // O OpenCV usa o padrão BGR (Blue, Green, Red)
-            cv::Scalar boxColor;
-            
-            if (classId == 67) { 
-                // Se for Celular, Vermelho (0 Azul, 0 Verde, 255 Vermelho)
-                boxColor = cv::Scalar(0, 0, 255);
-            } else {
-                // Se for qualquer outra coisa, Verde (0 Azul, 255 Verde, 0 Vermelho)
-                boxColor = cv::Scalar(0, 255, 0);
+                for (const auto& det : detections)
+                {
+                    if (det.box.area() <= 0) continue;
+                    if ((roi & det.box) != det.box) continue;
+
+                    if (det.isValid && det.classId == dCLASS_ID_CIRCULO)
+                    {
+                        circuloDetectadoNesteCiclo = true;
+
+                        cv::Scalar boxColor(0, 0, 255);
+                        std::string labelText = "CIRCULO";
+                        cv::rectangle(frame, det.box, boxColor, 2);
+                        cv::Point textPos(det.box.x, std::max(20, det.box.y - 5));
+                        cv::putText(frame, labelText, textPos, cv::FONT_HERSHEY_SIMPLEX, 0.6, boxColor, 2);
+                    }
+                    else if (!det.isValid)
+                    {
+                        cv::Scalar boxColor(0, 0, 255);
+                        std::string labelText = "Nao detectada";
+                        cv::rectangle(frame, det.box, boxColor, 2);
+                        cv::Point textPos(det.box.x, std::max(20, det.box.y - 5));
+                        cv::putText(frame, labelText, textPos, cv::FONT_HERSHEY_SIMPLEX, 0.6, boxColor, 2);
+                    }
+
+                    totalNaZona++;
+                }
+
+                // Atualiza a flag global do sinal
+                gSinalCirculo = circuloDetectadoNesteCiclo;
+
+                // [STM32] 4A. Se ACABOU de detectar um circulo (mudou de false para true)
+                if (gSinalCirculo && !estadoAnteriorSinal)
+                {
+                    std::cout << "[SINAL] >>> CIRCULO detectado na ROI! Avisando STM32 (0xA1)... <<<" << std::endl;
+                    bridge::enviar_objeto_encontrado();
+
+                    // Trava novas deteccoes imediatamente apos detectar 1 vez
+                    aguardandoLiberacaoStm32 = true;
+                }
+                // [STM32] 4B. Se o circulo SAIU da ROI (mudou de true para false)
+                else if (!gSinalCirculo && estadoAnteriorSinal)
+                {
+                    std::cout << "[SINAL] >>> Sem circulo na ROI. Avisando STM32 (0xA0)... <<<" << std::endl;
+                    bridge::enviar_sem_objeto();
+                }
+
+                estadoAnteriorSinal = gSinalCirculo;
+
+                // HUD normal quando a varredura esta ativa
+                cv::putText(frame, "Na zona: " + std::to_string(totalNaZona), cv::Point(10, 30),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 255, 255), 2);
+
+                if (gSinalCirculo)
+                {
+                    cv::putText(frame, "SINAL ATIVO: CIRCULO [FLAG = 1]", cv::Point(10, 65),
+                                cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 0, 255), 2);
+                }
             }
 
-            cv::rectangle(frame, box, boxColor, 2);
-            cv::circle(frame, center, 4, boxColor, -1); // Pinta a bolinha do centro com a mesma cor
+            cv::putText(frame, "[s] salvar ROI  [ESC] sair", cv::Point(10, frame.rows - 15),
+                        cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 255, 255), 1);
+
+            cv::imshow(dWINDOW_NAME, frame);
         }
 
-        cv::putText(frame, "Objetos detectados: " + std::to_string(cellCount),
-                    cv::Point(20, 40), cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 255, 0), 2);
-
-        cv::imshow("SICOV - Monitoramento de objetos", frame);
-
-        if (static_cast<char>(cv::waitKey(1)) == 27) 
-        {
-            isRunning = false;
-        }
+        int key = cv::waitKey(1) & 0xFF;
+        if (key == 27)  { break; }
+        if (key == 's') { SalvarROI(); }
     }
 
-    Vision_Stop();
-    Bsp_ReleaseCamera();
-    cv::destroyAllWindows();
+    Orchestrator_Stop();
 }
 
-/** @} DOXYGEN GROUP TAG END OF FILE */
+void Orchestrator_Stop(void)
+{
+    std::cout << "[ORCHESTRATOR] Parando servicos..." << std::endl;
+    // [STM32] 5. Desconecta do STM32 com seguranca ao fechar o programa
+    bridge::desconectar();
+    Camera_Stop();
+    Vision_Stop();
+    cv::destroyAllWindows();
+    std::cout << "[ORCHESTRATOR] Sistema encerrado com seguranca." << std::endl;
+}
+
+static void CarregarROI(void)
+{
+    cv::FileStorage fs(dROI_CONFIG_FILE, cv::FileStorage::READ);
+    if (!fs.isOpened()) return;
+
+    auto ler = [&fs](const char* chave, int& destino)
+    {
+        cv::FileNode node = fs[chave];
+        if (!node.empty())
+        {
+            int v = 0;
+            node >> v;
+            destino = std::min(std::max(v, 0), dROI_MAX);
+        }
+    };
+
+    ler("cx", gRoiCx);
+    ler("cy", gRoiCy);
+    ler("w",  gRoiW);
+    ler("h",  gRoiH);
+
+    std::cout << "[ORCHESTRATOR] ROI carregada de " << dROI_CONFIG_FILE << std::endl;
+}
+
+static void SalvarROI(void)
+{
+    cv::FileStorage fs(dROI_CONFIG_FILE, cv::FileStorage::WRITE);
+    if (!fs.isOpened())
+    {
+        std::cerr << "[ORCHESTRATOR] Nao foi possivel gravar " << dROI_CONFIG_FILE << std::endl;
+        return;
+    }
+
+    fs << "cx" << gRoiCx << "cy" << gRoiCy << "w" << gRoiW << "h" << gRoiH;
+
+    std::cout << "[ORCHESTRATOR] ROI salva: cx=" << gRoiCx << " cy=" << gRoiCy
+              << " w=" << gRoiW << " h=" << gRoiH << std::endl;
+}
+
+static cv::Rect ObterEnquadramentoInspecao(const cv::Size& frameSize)
+{
+    int w = std::max(1, frameSize.width  * gRoiW / dROI_MAX);
+    int h = std::max(1, frameSize.height * gRoiH / dROI_MAX);
+
+    int x = frameSize.width  * gRoiCx / dROI_MAX - w / 2;
+    int y = frameSize.height * gRoiCy / dROI_MAX - h / 2;
+
+    return cv::Rect(x, y, w, h) & cv::Rect(0, 0, frameSize.width, frameSize.height);
+}
+
+static std::string ObterNomeForma(int classId)
+{
+    switch (classId)
+    {
+        case 0: return "CIRCULO";
+        case 1: return "Hexagono";
+        case 2: return "Losango";
+        case 3: return "Quadrado";
+        case 4: return "Retangulo";
+        case 5: return "Triangulo";
+        default: return "Nao detectada";
+    }
+}
